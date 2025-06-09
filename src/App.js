@@ -11,7 +11,7 @@ const KPIAnalyzer = () => {
   const [allKPIs, setAllKPIs] = useState([]);
   const [allMonths, setAllMonths] = useState([]);
   const [googleSheetsUrl, setGoogleSheetsUrl] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState(''); // 'success', 'error', 'loading'
+  const [connectionStatus, setConnectionStatus] = useState('');
 
   const extractSpreadsheetId = (url) => {
     const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
@@ -19,28 +19,30 @@ const KPIAnalyzer = () => {
   };
 
   const fetchGoogleSheet = async (spreadsheetId, sheetName) => {
-    const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gid=0/export?format=csv&gid=${sheetName}`;
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
     
     try {
-      const response = await fetch(csvUrl);
+      const response = await fetch(csvUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/csv'
+        }
+      });
+      
       if (!response.ok) {
-        throw new Error(`Error al cargar ${sheetName}: ${response.status}`);
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
+      
       const csvText = await response.text();
+      
+      if (csvText.includes('<!DOCTYPE html>') || csvText.includes('<html')) {
+        throw new Error(`La hoja "${sheetName}" no existe o no es accesible`);
+      }
+      
       return csvText;
     } catch (error) {
-      // Intentar con URL alternativa
-      const alternativeUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
-      try {
-        const response = await fetch(alternativeUrl);
-        if (!response.ok) {
-          throw new Error(`Error al cargar ${sheetName}: ${response.status}`);
-        }
-        const csvText = await response.text();
-        return csvText;
-      } catch (secondError) {
-        throw new Error(`No se pudo cargar la hoja "${sheetName}". Verifica que el documento sea público.`);
-      }
+      console.error(`Error cargando ${sheetName}:`, error);
+      throw new Error(`No se pudo cargar la hoja "${sheetName}": ${error.message}`);
     }
   };
 
@@ -61,7 +63,6 @@ const KPIAnalyzer = () => {
       throw new Error(`No se encontró una columna de KPIs en "${agencyName}". Columnas disponibles: ${headers.join(', ')}`);
     }
 
-    // Identificar columnas de meses (más flexible)
     const monthColumns = headers.filter(header => {
       const monthRegex = /(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}\/\d{4}|\d{4}-\d{2})/i;
       return monthRegex.test(header) || /^(Q[1-4]|T[1-4])/.test(header);
@@ -104,7 +105,7 @@ const KPIAnalyzer = () => {
 
     const spreadsheetId = extractSpreadsheetId(googleSheetsUrl);
     if (!spreadsheetId) {
-      alert('URL inválida. Asegúrate de usar una URL válida de Google Sheets');
+      alert('❌ URL inválida. Asegúrate de usar una URL válida de Google Sheets\n\n✅ Ejemplo: https://docs.google.com/spreadsheets/d/TU_ID_AQUI/edit');
       return;
     }
 
@@ -112,45 +113,54 @@ const KPIAnalyzer = () => {
     setConnectionStatus('loading');
     
     try {
-      // Primero, intentamos obtener información sobre las hojas
-      const metadataUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=0`;
-      
-      // Lista de nombres de agencias esperados (puedes personalizar esto)
       const expectedAgencies = [
-        'Mazatlán', 'Culiacán', 'Los Mochis', 'Hermosillo', 
-        'Tijuana', 'Mexicali', 'La Paz', 'Los Cabos', 'Ensenada'
+        'GWM Iztapalapa', 'GWM Morelos', 'Honda Cuajimalpa', 'Honda Interlomas', 
+        'KIA Interlomas', 'KIA Iztapalapa', 'MG Cuajimalpa', 'MG Interlomas', 'MG Iztapalapa'
       ];
 
       const loadedAgencies = [];
       const allKPIsSet = new Set();
       const allMonthsSet = new Set();
       const errors = [];
+      const successes = [];
 
-      // Intentar cargar cada hoja
       for (const agencyName of expectedAgencies) {
         try {
+          console.log(`🔗 Intentando cargar: ${agencyName}`);
           const csvData = await fetchGoogleSheet(spreadsheetId, agencyName);
           
-          const parsedData = Papa.parse(csvData, {
-            header: true,
-            skipEmptyLines: true,
-            transformHeader: (header) => header.trim()
-          });
+          if (csvData && csvData.trim().length > 0) {
+            const parsedData = Papa.parse(csvData, {
+              header: true,
+              skipEmptyLines: true,
+              transformHeader: (header) => header.trim(),
+              delimiter: ','
+            });
 
-          if (parsedData.data && parsedData.data.length > 0) {
-            const processedData = processParsedData(parsedData.data, agencyName);
-            loadedAgencies.push(processedData);
-            
-            processedData.kpis.forEach(kpi => allKPIsSet.add(kpi));
-            processedData.months.forEach(month => allMonthsSet.add(month));
+            console.log(`📊 Datos parseados para ${agencyName}:`, parsedData.data?.length, 'filas');
+
+            if (parsedData.data && parsedData.data.length > 0) {
+              const processedData = processParsedData(parsedData.data, agencyName);
+              loadedAgencies.push(processedData);
+              
+              processedData.kpis.forEach(kpi => allKPIsSet.add(kpi));
+              processedData.months.forEach(month => allMonthsSet.add(month));
+              
+              successes.push(`✅ ${agencyName}: ${processedData.kpis.length} KPIs, ${processedData.months.length} meses`);
+            } else {
+              errors.push(`❌ ${agencyName}: Hoja vacía o sin datos válidos`);
+            }
+          } else {
+            errors.push(`❌ ${agencyName}: No se obtuvieron datos`);
           }
         } catch (error) {
-          errors.push(`${agencyName}: ${error.message}`);
+          console.error(`❌ Error con ${agencyName}:`, error);
+          errors.push(`❌ ${agencyName}: ${error.message}`);
         }
       }
 
       if (loadedAgencies.length === 0) {
-        throw new Error('No se pudo cargar ninguna hoja. Errores:\n' + errors.join('\n'));
+        throw new Error(`❌ No se pudo cargar ninguna hoja.\n\n⚠️ Errores encontrados:\n${errors.join('\n')}\n\n🔧 Verifica que:\n\n1️⃣ El documento sea PÚBLICO (Compartir → Cualquier persona con enlace → Visor)\n2️⃣ Las hojas tengan los nombres exactos de las agencias\n3️⃣ Cada hoja tenga datos con columnas KPI y meses\n\n💡 Nombres esperados: ${expectedAgencies.join(', ')}`);
       }
 
       setAgencies(loadedAgencies);
@@ -159,23 +169,153 @@ const KPIAnalyzer = () => {
       setAllKPIs(kpiArray);
       setAllMonths(monthArray);
       
-      // Seleccionar valores por defecto
       setSelectedAgencies(loadedAgencies.map(a => a.name));
       setSelectedMonths(monthArray.slice(0, 6));
       
       setConnectionStatus('success');
       
+      const summary = `🎉 ¡CONEXIÓN EXITOSA!\n\n📊 Resumen:\n${successes.join('\n')}\n\n📈 Total: ${loadedAgencies.length} agencias cargadas\n📋 ${kpiArray.length} KPIs únicos encontrados\n📅 ${monthArray.length} períodos detectados`;
+      
       if (errors.length > 0) {
-        alert(`Se cargaron ${loadedAgencies.length} agencias exitosamente.\n\nAdvertencias:\n${errors.join('\n')}`);
+        alert(`${summary}\n\n⚠️ Advertencias:\n${errors.join('\n')}`);
+      } else {
+        alert(summary);
       }
 
     } catch (error) {
-      console.error('Error conectando a Google Sheets:', error);
+      console.error('💥 Error conectando a Google Sheets:', error);
       setConnectionStatus('error');
-      alert(`Error al conectar con Google Sheets: ${error.message}\n\nAsegúrate de que:\n1. El documento sea público (Anyone with the link can view)\n2. La URL sea correcta\n3. Las hojas tengan los nombres de las agencias`);
+      alert(`❌ Error al conectar con Google Sheets:\n\n${error.message}\n\n🔧 Solución rápida:\n\n1️⃣ Ve a tu Google Sheets\n2️⃣ Clic en "Compartir" (botón azul arriba a la derecha)\n3️⃣ Cambiar a "Cualquier persona con el enlace"\n4️⃣ Permisos: "Visor"\n5️⃣ Copiar enlace y pegarlo aquí\n\n💡 El enlace debe verse así:\nhttps://docs.google.com/spreadsheets/d/TU_ID/edit`);
     }
     
     setLoading(false);
+  };
+
+  const connectToAppsScript = async () => {
+    if (!googleSheetsUrl.trim()) {
+      alert('Por favor ingresa la URL de Apps Script');
+      return;
+    }
+
+    setLoading(true);
+    setConnectionStatus('loading');
+    
+    try {
+      const response = await fetch(googleSheetsUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      const jsonData = await response.json();
+      
+      const loadedAgencies = [];
+      const allKPIsSet = new Set();
+      const allMonthsSet = new Set();
+      const errors = [];
+      const successes = [];
+
+      Object.entries(jsonData).forEach(([sheetName, sheetData]) => {
+        try {
+          if (sheetData && Array.isArray(sheetData) && sheetData.length > 0 && 
+              !sheetName.toLowerCase().includes('template') && 
+              !sheetName.toLowerCase().includes('instruction') &&
+              !sheetName.toLowerCase().includes('ejemplo') &&
+              sheetName !== 'Sheet1' && sheetName !== 'Hoja1') {
+            
+            const processedData = processParsedData(sheetData, sheetName);
+            loadedAgencies.push(processedData);
+            
+            processedData.kpis.forEach(kpi => allKPIsSet.add(kpi));
+            processedData.months.forEach(month => allMonthsSet.add(month));
+            
+            successes.push(`✓ ${sheetName}: ${processedData.kpis.length} KPIs, ${processedData.months.length} meses`);
+          }
+        } catch (error) {
+          errors.push(`${sheetName}: ${error.message}`);
+        }
+      });
+
+      if (loadedAgencies.length === 0) {
+        const allSheets = Object.keys(jsonData);
+        throw new Error(`No se encontraron datos válidos en las hojas.\n\nHojas encontradas: ${allSheets.join(', ')}\n\nErrores: ${errors.join('; ')}\n\nVerifica que cada hoja tenga:\n- Una columna con "KPI" o "Indicador"\n- Columnas con nombres de meses\n- Datos en las filas`);
+      }
+
+      setAgencies(loadedAgencies);
+      setAllKPIs(Array.from(allKPIsSet));
+      setAllMonths(Array.from(allMonthsSet));
+      setSelectedAgencies(loadedAgencies.map(a => a.name));
+      setSelectedMonths(Array.from(allMonthsSet).slice(0, 6));
+      
+      setConnectionStatus('success');
+      
+      let message = `✅ ¡Conexión exitosa!\n\n📊 Agencias cargadas:\n${successes.join('\n')}`;
+      
+      if (errors.length > 0) {
+        message += `\n\n⚠️ Hojas no procesadas:\n${errors.join('\n')}`;
+      }
+      
+      alert(message);
+
+    } catch (error) {
+      console.error('Error:', error);
+      setConnectionStatus('error');
+      alert(`❌ Error: ${error.message}\n\nVerifica que:\n1. La URL de Apps Script sea correcta\n2. Esté desplegada como aplicación web\n3. Tenga permisos para "Cualquier persona"`);
+    }
+    
+    setLoading(false);
+  };
+
+  const handlePasteData = (pastedData) => {
+    if (pastedData.trim().length > 100) {
+      console.log('Datos detectados, listos para procesar');
+    }
+  };
+
+  const processPastedData = (agencyName) => {
+    const textarea = document.querySelector('textarea');
+    const pastedData = textarea.value;
+    
+    if (!pastedData.trim() || !agencyName.trim()) {
+      alert('Por favor ingresa tanto los datos como el nombre de la agencia');
+      return;
+    }
+
+    try {
+      const lines = pastedData.trim().split('\n');
+      const csvData = lines.map(line => line.split('\t')).map(row => row.join(','));
+      const csvString = csvData.join('\n');
+      
+      const parsedData = Papa.parse(csvString, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (header) => header.trim()
+      });
+
+      if (parsedData.data && parsedData.data.length > 0) {
+        const processedData = processParsedData(parsedData.data, agencyName);
+        
+        setAgencies(prev => {
+          const updated = [...prev.filter(a => a.name !== agencyName), processedData];
+          return updated;
+        });
+        
+        const allKPIsSet = new Set(allKPIs);
+        const allMonthsSet = new Set(allMonths);
+        processedData.kpis.forEach(kpi => allKPIsSet.add(kpi));
+        processedData.months.forEach(month => allMonthsSet.add(month));
+        setAllKPIs(Array.from(allKPIsSet));
+        setAllMonths(Array.from(allMonthsSet));
+        
+        textarea.value = '';
+        document.querySelector('input[placeholder="Nombre de la agencia"]').value = '';
+        
+        alert(`✅ Agencia "${agencyName}" agregada exitosamente!\n${processedData.kpis.length} KPIs detectados`);
+      } else {
+        throw new Error('No se pudieron procesar los datos pegados');
+      }
+    } catch (error) {
+      alert(`❌ Error procesando datos: ${error.message}\n\nAsegúrate de copiar los datos con encabezados desde Google Sheets`);
+    }
   };
 
   const handleFileUpload = useCallback(async (files) => {
@@ -277,87 +417,83 @@ const KPIAnalyzer = () => {
   const allKPIsData = generateAllKPIsData();
 
   const colors = [
-    '#8884d8', '#82ca9d', '#ffc658', '#ff7300', '#e74c3c', 
-    '#9b59b6', '#1abc9c', '#f39c12', '#34495e'
+    '#DC2626', '#EA580C', '#D97706', '#CA8A04', '#65A30D', 
+    '#059669', '#0891B2', '#2563EB', '#7C3AED'
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black p-6">
       <div className="max-w-7xl mx-auto">
-        <div className="bg-white rounded-2xl shadow-xl p-8 mb-8">
+        <div className="bg-gradient-to-r from-gray-50 via-amber-50 to-gray-50 rounded-2xl shadow-2xl border border-gray-200 p-8 mb-8">
           <div className="text-center mb-8">
-            {/* Logo Section */}
-            <div className="mb-6">
-              <div className="bg-gray-100 border-2 border-dashed border-gray-300 rounded-lg p-8 mb-4 hover:border-blue-400 transition-colors">
-                <div className="flex flex-col items-center">
-                  <img 
-                    id="company-logo" 
-                    src="" 
-                    alt="Logo de la empresa" 
-                    className="max-h-16 mb-2 hidden"
-                    onError={(e) => e.target.style.display = 'none'}
-                  />
-                  <div id="logo-placeholder" className="flex flex-col items-center">
-                    <Building2 className="text-gray-400 mb-2" size={32} />
-                    <p className="text-sm text-gray-500 mb-2">Haz clic para subir el logo de tu empresa</p>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="text-xs text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                      onChange={(e) => {
-                        const file = e.target.files[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            const logo = document.getElementById('company-logo');
-                            const placeholder = document.getElementById('logo-placeholder');
-                            logo.src = event.target.result;
-                            logo.classList.remove('hidden');
-                            logo.style.display = 'block';
-                            placeholder.style.display = 'none';
-                          };
-                          reader.readAsDataURL(file);
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            <h1 className="text-4xl font-bold text-gray-800 mb-4 flex items-center justify-center gap-3">
-              <BarChart3 className="text-blue-600" size={40} />
+            <h1 className="text-4xl font-bold text-gray-900 mb-4 flex items-center justify-center gap-3">
+              <BarChart3 className="text-red-500" size={40} />
               KPIs Seminuevos - Grupo Daytona
             </h1>
-            <p className="text-gray-600 text-lg">Conecta tu Google Sheets y genera comparativas automáticas de las 9 agencias</p>
+            <p className="text-gray-700 text-lg">Conecta tu Google Sheets y genera comparativas automáticas de tus agencias automotrices</p>
           </div>
 
-          {/* Google Sheets Connection */}
+          {/* Google Apps Script Connection */}
           <div className="mb-8">
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+            <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
               <div className="flex items-center gap-2 mb-2">
-                <Link className="text-green-600" size={20} />
-                <h3 className="font-semibold text-green-800">Conectar con Google Sheets</h3>
+                <Link className="text-red-600" size={20} />
+                <h3 className="font-semibold text-gray-800">Opción 1: Conectar via Google Apps Script (Recomendada)</h3>
               </div>
-              <ul className="text-sm text-green-700 space-y-1 mb-4">
-                <li>• Asegúrate de que tu Google Sheets sea público (Anyone with the link can view)</li>
-                <li>• Cada hoja debe tener el nombre de la agencia (Mazatlán, Culiacán, Los Mochis, etc.)</li>
-                <li>• Cada hoja debe tener una columna con "KPI" y columnas para cada mes</li>
-                <li>• Copia y pega la URL completa de tu Google Sheets</li>
-              </ul>
+              <div className="text-sm text-gray-700 space-y-2 mb-4">
+                <p><strong>Paso 1:</strong> Ve a tu Google Sheets → Extensiones → Apps Script</p>
+                <p><strong>Paso 2:</strong> Pega el siguiente código:</p>
+                <div className="bg-gray-100 p-3 rounded text-xs font-mono overflow-x-auto">
+{`function doGet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var data = {};
+  
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var sheetName = sheet.getName();
+    var values = sheet.getDataRange().getValues();
+    
+    if (values.length > 0) {
+      var headers = values[0];
+      var rows = values.slice(1);
+      
+      data[sheetName] = [];
+      
+      for (var j = 0; j < rows.length; j++) {
+        var obj = {};
+        for (var k = 0; k < headers.length; k++) {
+          obj[headers[k]] = rows[j][k];
+        }
+        data[sheetName].push(obj);
+      }
+    }
+  }
+  
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}`}
+                </div>
+                <p><strong>Paso 3:</strong> Guardar → Implementar → Nueva implementación → Tipo: Aplicación web</p>
+                <p><strong>Paso 4:</strong> Ejecutar como: Yo, Acceso: Cualquier persona</p>
+                <p><strong>Paso 5:</strong> ⚠️ IMPORTANTE: Después de implementar, debes AUTORIZAR permisos</p>
+                <p><strong>Paso 6:</strong> Copia la URL generada y pégala aquí:</p>
+                <p><strong>📋 Tus agencias:</strong> GWM Iztapalapa, GWM Morelos, Honda Cuajimalpa, Honda Interlomas, KIA Interlomas, KIA Iztapalapa, MG Cuajimalpa, MG Interlomas, MG Iztapalapa</p>
+              </div>
               
               <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="https://docs.google.com/spreadsheets/d/tu-documento-id/edit..."
+                  placeholder="https://script.google.com/macros/s/TU_SCRIPT_ID/exec"
                   value={googleSheetsUrl}
                   onChange={(e) => setGoogleSheetsUrl(e.target.value)}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
                 />
                 <button
-                  onClick={connectToGoogleSheets}
+                  onClick={connectToAppsScript}
                   disabled={loading}
-                  className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  className="px-6 py-2 bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-lg hover:from-red-600 hover:to-orange-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg"
                 >
                   {loading ? (
                     <>
@@ -367,7 +503,7 @@ const KPIAnalyzer = () => {
                   ) : (
                     <>
                       <Link size={16} />
-                      Conectar
+                      Conectar Apps Script
                     </>
                   )}
                 </button>
@@ -375,7 +511,7 @@ const KPIAnalyzer = () => {
 
               {connectionStatus === 'success' && (
                 <div className="mt-3 p-2 bg-green-100 border border-green-300 rounded text-green-800 text-sm flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <div className="w-2 h-2 bg-red-500 rounded-full"></div>
                   Conectado exitosamente - {agencies.length} agencias cargadas
                 </div>
               )}
@@ -387,27 +523,55 @@ const KPIAnalyzer = () => {
                 </div>
               )}
             </div>
+
+            <div className="bg-gradient-to-r from-gray-50 to-amber-50 border border-gray-300 rounded-lg p-4 mb-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Upload className="text-red-500" size={20} />
+                <h3 className="font-semibold text-gray-800">Opción 3: Exportar y Subir CSV</h3>
+              </div>
+              <div className="text-sm text-gray-700 space-y-1 mb-4">
+                <p>• Ve a tu Google Sheets</p>
+                <p>• Archivo → Descargar → Valores separados por comas (.csv)</p>
+                <p>• Repite para cada hoja/agencia</p>
+                <p>• Sube los archivos CSV aquí</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-orange-50 to-red-50 border border-orange-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <FileSpreadsheet className="text-red-500" size={20} />
+                <h3 className="font-semibold text-gray-800">Opción 4: Copia y Pega Datos</h3>
+              </div>
+              <p className="text-sm text-gray-700 mb-3">Copia los datos directamente desde Google Sheets y pégalos aquí:</p>
+              <div className="space-y-2">
+                <textarea
+                  placeholder="Pega aquí los datos de una agencia (incluye encabezados)..."
+                  className="w-full h-32 px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent resize-none"
+                  onChange={(e) => handlePasteData(e.target.value)}
+                />
+                <input
+                  type="text"
+                  placeholder="Nombre de la agencia"
+                  className="w-full px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter') {
+                      processPastedData(e.target.value);
+                    }
+                  }}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Alternative Upload Section */}
           <div className="mb-8">
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Upload className="text-blue-600" size={20} />
-                <h3 className="font-semibold text-blue-800">Alternativa: Subir Archivos CSV</h3>
-              </div>
-              <p className="text-sm text-blue-700 mb-4">
-                Si prefieres, puedes exportar cada hoja como CSV y subirlas manualmente
-              </p>
-            </div>
-
-            <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-blue-300 border-dashed rounded-xl cursor-pointer bg-blue-50 hover:bg-blue-100 transition-colors">
+            <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-red-300 border-dashed rounded-xl cursor-pointer bg-gradient-to-r from-orange-50 to-red-50 hover:from-orange-100 hover:to-red-100 transition-colors">
               <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                <Upload className="w-10 h-10 mb-3 text-blue-500" />
-                <p className="mb-2 text-sm text-blue-600">
+                <Upload className="w-10 h-10 mb-3 text-red-500" />
+                <p className="mb-2 text-sm text-red-600">
                   <span className="font-semibold">Clic para subir</span> archivos CSV de agencias
                 </p>
-                <p className="text-xs text-blue-500">CSV - Múltiples archivos permitidos</p>
+                <p className="text-xs text-red-500">CSV - Múltiples archivos permitidos</p>
               </div>
               <input
                 type="file"
@@ -423,12 +587,12 @@ const KPIAnalyzer = () => {
           {agencies.length > 0 && (
             <div className="mb-8">
               <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <Building2 className="text-blue-600" size={20} />
+                <Building2 className="text-red-500" size={20} />
                 Agencias Cargadas ({agencies.length}/9)
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {agencies.map((agency) => (
-                  <div key={agency.name} className="bg-gray-50 rounded-lg p-4 relative border-l-4" style={{borderLeftColor: colors[agencies.indexOf(agency) % colors.length]}}>
+                  <div key={agency.name} className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg p-4 relative border-l-4 shadow-md" style={{borderLeftColor: colors[agencies.indexOf(agency) % colors.length]}}>
                     <button
                       onClick={() => removeAgency(agency.name)}
                       className="absolute top-2 right-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-full p-1"
@@ -461,9 +625,9 @@ const KPIAnalyzer = () => {
           {agencies.length > 0 && (
             <div className="space-y-8">
               {/* Controls */}
-              <div className="bg-gray-50 rounded-xl p-6">
+              <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-xl p-6 border border-gray-200">
                 <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-                  <FileSpreadsheet className="text-blue-600" size={24} />
+                  <FileSpreadsheet className="text-red-500" size={24} />
                   Configuración de Análisis
                 </h3>
                 
@@ -546,10 +710,10 @@ const KPIAnalyzer = () => {
 
               {/* Summary Table - All KPIs */}
               {allKPIsData.length > 0 && (
-                <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="bg-gradient-to-r from-gray-50 via-amber-50 to-gray-50 rounded-xl shadow-lg p-6 border border-gray-200">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-xl font-semibold flex items-center gap-2">
-                      <FileSpreadsheet className="text-blue-600" size={24} />
+                      <FileSpreadsheet className="text-red-500" size={24} />
                       Comparativa de KPIs por Agencia
                     </h3>
                     <div className="text-sm text-gray-600">
@@ -577,11 +741,11 @@ const KPIAnalyzer = () => {
                       <tbody className="bg-white divide-y divide-gray-200">
                         {allKPIs.map(kpi => 
                           selectedMonths.map((month, monthIndex) => (
-                            <tr key={`${kpi}-${month}`} className={monthIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                              <td className="px-4 py-4 text-sm font-medium text-blue-600 sticky left-0 bg-inherit z-10 min-w-32 shadow-r">
+                            <tr key={`${kpi}-${month}`} className={monthIndex % 2 === 0 ? 'bg-white' : 'bg-amber-50'}>
+                              <td className="px-4 py-4 text-sm font-medium text-red-600 sticky left-0 bg-inherit z-10 min-w-32 shadow-r">
                                 {kpi}
                               </td>
-                              <td className="px-4 py-4 text-sm text-gray-700 font-medium sticky left-32 bg-inherit z-10 min-w-24 shadow-r">
+                              <td className="px-4 py-4 text-sm text-gray-800 font-medium sticky left-32 bg-inherit z-10 min-w-24 shadow-r">
                                 {month}
                               </td>
                               {selectedAgencies.map((agencyName, agencyIndex) => {
@@ -608,17 +772,17 @@ const KPIAnalyzer = () => {
                   
                   {/* Summary Stats */}
                   <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-blue-50 p-4 rounded-lg">
-                      <h4 className="font-medium text-blue-800 mb-2">Total de KPIs</h4>
-                      <p className="text-2xl font-bold text-blue-600">{allKPIs.length}</p>
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 p-4 rounded-lg border border-red-200">
+                      <h4 className="font-medium text-red-800 mb-2">Total de KPIs</h4>
+                      <p className="text-2xl font-bold text-red-600">{allKPIs.length}</p>
                     </div>
-                    <div className="bg-green-50 p-4 rounded-lg">
-                      <h4 className="font-medium text-green-800 mb-2">Agencias Analizadas</h4>
-                      <p className="text-2xl font-bold text-green-600">{selectedAgencies.length}</p>
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 p-4 rounded-lg border border-amber-200">
+                      <h4 className="font-medium text-amber-800 mb-2">Agencias Analizadas</h4>
+                      <p className="text-2xl font-bold text-amber-600">{selectedAgencies.length}</p>
                     </div>
-                    <div className="bg-purple-50 p-4 rounded-lg">
-                      <h4 className="font-medium text-purple-800 mb-2">Períodos Analizados</h4>
-                      <p className="text-2xl font-bold text-purple-600">{selectedMonths.length}</p>
+                    <div className="bg-gradient-to-r from-orange-50 to-red-50 p-4 rounded-lg border border-orange-200">
+                      <h4 className="font-medium text-orange-800 mb-2">Períodos Analizados</h4>
+                      <p className="text-2xl font-bold text-orange-600">{selectedMonths.length}</p>
                     </div>
                   </div>
                 </div>
@@ -628,9 +792,9 @@ const KPIAnalyzer = () => {
               {allKPIsData.length > 0 && (
                 <div className="space-y-8">
                   {/* KPI Comparison by Agency */}
-                  <div className="bg-white rounded-xl shadow-lg p-6">
+                  <div className="bg-gradient-to-r from-gray-50 via-amber-50 to-gray-50 rounded-xl shadow-lg p-6 border border-gray-200">
                     <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
-                      <TrendingUp className="text-blue-600" size={24} />
+                      <TrendingUp className="text-red-500" size={24} />
                       Comparativa de KPIs por Agencia
                     </h3>
                     <div className="h-96">
@@ -672,9 +836,9 @@ const KPIAnalyzer = () => {
                   </div>
 
                   {/* Monthly Trends */}
-                  <div className="bg-white rounded-xl shadow-lg p-6">
+                  <div className="bg-gradient-to-r from-gray-50 via-amber-50 to-gray-50 rounded-xl shadow-lg p-6 border border-gray-200">
                     <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
-                      <TrendingUp className="text-green-600" size={24} />
+                      <TrendingUp className="text-red-500" size={24} />
                       Tendencias Mensuales por Agencia
                     </h3>
                     <div className="h-96">
@@ -711,91 +875,6 @@ const KPIAnalyzer = () => {
                           ))}
                         </LineChart>
                       </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  {/* Top Performing KPIs */}
-                  <div className="bg-white rounded-xl shadow-lg p-6">
-                    <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
-                      <BarChart3 className="text-purple-600" size={24} />
-                      KPIs con Mejor Rendimiento
-                    </h3>
-                    <div className="h-96">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={(() => {
-                          const kpiTotals = {};
-                          allKPIs.forEach(kpi => {
-                            kpiTotals[kpi] = 0;
-                            selectedAgencies.forEach(agencyName => {
-                              const agency = agencies.find(a => a.name === agencyName);
-                              selectedMonths.forEach(month => {
-                                kpiTotals[kpi] += agency?.monthlyData[kpi]?.[month] || 0;
-                              });
-                            });
-                          });
-                          
-                          return Object.entries(kpiTotals)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 8)
-                            .map(([kpi, total]) => ({
-                              kpi: kpi.substring(0, 25) + (kpi.length > 25 ? '...' : ''),
-                              total: total
-                            }));
-                        })()}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="kpi" angle={-45} textAnchor="end" height={100} />
-                          <YAxis />
-                          <Tooltip />
-                          <Bar dataKey="total" fill="#8b5cf6" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  {/* Performance Metrics Summary */}
-                  <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl p-6">
-                    <h3 className="text-xl font-semibold mb-6 text-gray-800">Resumen de Rendimiento - {selectedAgencies.length} Agencias</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {selectedAgencies.map((agencyName, index) => {
-                        const agency = agencies.find(a => a.name === agencyName);
-                        const totalPerformance = allKPIs.reduce((sum, kpi) => {
-                          return sum + selectedMonths.reduce((monthSum, month) => {
-                            return monthSum + (agency?.monthlyData[kpi]?.[month] || 0);
-                          }, 0);
-                        }, 0);
-                        
-                        const allTotals = selectedAgencies.map(an => {
-                          const ag = agencies.find(a => a.name === an);
-                          return allKPIs.reduce((sum, kpi) => {
-                            return sum + selectedMonths.reduce((monthSum, month) => {
-                              return monthSum + (ag?.monthlyData[kpi]?.[month] || 0);
-                            }, 0);
-                          }, 0);
-                        });
-                        const sortedTotals = [...allTotals].sort((a, b) => b - a);
-                        const ranking = sortedTotals.indexOf(totalPerformance) + 1;
-                        
-                        return (
-                          <div key={agencyName} className="bg-white rounded-lg p-4 shadow-md relative">
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center">
-                                <div 
-                                  className="w-4 h-4 rounded-full mr-2" 
-                                  style={{ backgroundColor: colors[index % colors.length] }}
-                                ></div>
-                                <h4 className="font-semibold text-gray-800 text-sm">{agencyName}</h4>
-                              </div>
-                              <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
-                                #{ranking}
-                              </span>
-                            </div>
-                            <p className="text-xl font-bold text-gray-700 mb-1">
-                              {totalPerformance.toLocaleString()}
-                            </p>
-                            <p className="text-xs text-gray-500">Total acumulado</p>
-                          </div>
-                        );
-                      })}
                     </div>
                   </div>
                 </div>
